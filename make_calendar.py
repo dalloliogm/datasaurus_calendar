@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Datasaurus / Anscombe-inspired calendar.
 
-Every month shows a different scatter-plot shape, but all twelve datasets have
+Every month shows a different scatter-plot drawing, but all twelve datasets have
 *exactly* the same mean(x), mean(y), sd(x), sd(y), Pearson r and therefore the
-same linear-regression line and R^2.
+same regression line and R^2.
 
-How the stats are matched: each shape is generated as a point cloud, then an
-affine "stats fix" is applied (standardise, re-mix the residual so that the
-correlation equals TARGET_R, rescale to the target means/SDs). Because the fix
-is affine, the shape stays recognisable (it is only sheared/stretched), and the
-statistics are equal to floating-point precision rather than "close enough".
+How: the main drawing is placed at uniform scale and is NEVER stretched or sheared.
+A baby copy of it plus loose stars sit in the two corners along the diagonal; they
+carry the correlation (the star ribbon width is bisected until r hits the target).
+One small affine map applied to those extras only then makes the five statistics
+exactly equal in all twelve months.
+
+January is the real Datasaurus (data/datasaurus_dozen.csv, Matejka & Fitzmaurice 2017).
 
 Usage:  python make_calendar.py [--year 2027] [--r 0.816] [--out out]
 """
@@ -22,11 +24,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import minimize
 from matplotlib.backends.backend_pdf import PdfPages
 
-N = 142                      # points per shape (= size of the real Datasaurus dozen sets)
-TARGET_MEAN = (50.0, 50.0)
-TARGET_SD = (20.0, 20.0)       # equal SDs so the diagonal stretch is symmetric
+N = 142                      # points per drawing (= size of the real Datasaurus dozen sets)
 
 
 # --------------------------------------------------------------------------
@@ -66,7 +67,7 @@ def outlier_line():                # Apr  - Anscombe III (flat line + outlier)
     k = 8                                  # a few outliers keep the plot readable
     x = np.sort(r.uniform(0, 10, N - k))
     y = 5 + r.normal(0, 0.05, N - k)
-    return (np.append(x, r.uniform(8.5, 9.5, k)),
+    return (np.append(x, r.uniform(4, 6, k)),
             np.append(y, r.uniform(8, 13, k)))
 
 
@@ -99,14 +100,14 @@ def ring():                        # Jun  (sun / circle)
 
 def sine():                        # Jul
     x = np.linspace(0, 4 * np.pi, N)
-    return x, np.sin(x) * 2 + 0.6 * x
+    return x, np.sin(x) * 2
 
 
 def clusters():                    # Aug
     r = _rng(9)
     h = N // 2
     return (np.concatenate([r.normal(2, .8, h), r.normal(8, .8, N - h)]),
-            np.concatenate([r.normal(2, .8, h), r.normal(8, .8, N - h)]))
+            np.concatenate([r.normal(5, .8, h), r.normal(5, .8, N - h)]))
 
 
 def spiral():                      # Sep
@@ -129,11 +130,6 @@ def tree():                        # Dec  (zig-zag Christmas tree + trunk)
     return along_path(px, py, jitter=0.05, seed=11)
 
 
-# per-shape overrides for compose(): radius = size, rotate = rigid rotation in degrees.
-# The dino is tilted clockwise so that it climbs along the trend (positive r of its own);
-# that lets it be larger and keeps the final stats fix from shearing it.
-SHAPE_OPTS = {dino: dict(radius=30, rotate=-32)}
-
 # month -> (shape fn, caption)
 SHAPES = [
     (dino, "Datasaurus"),
@@ -152,84 +148,118 @@ SHAPES = [
 
 
 # --------------------------------------------------------------------------
-def match_stats(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
-    """Exact means, SDs and Pearson r, by stretching the shape along the diagonal.
-
-    The shape's own axes (s, t) are whitened, then mapped so that s runs along
-    the y = x diagonal and t across it:  zx = p s + q t,  zy = p s - q t with
-    p = sqrt((1+r)/2), q = sqrt((1-r)/2).  That gives var = 1 for both and
-    corr = r, and keeps right angles of the shape intact up to a uniform
-    stretch (a vertical shear would distort it far more).
-    """
-    s = (x - x.mean()) / x.std()
-    t = (y - y.mean()) / y.std()
-    t = t - np.mean(s * t) * s
-    t = (t - t.mean()) / t.std()
-    p, q = np.sqrt((1 + r_target) / 2), np.sqrt((1 - r_target) / 2)
-    zx, zy = p * s + q * t, p * s - q * t
-    return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy
-
-
-N_STARS = 40
-SHAPE_RADIUS = 24.0          # 95th-percentile radius of the shape, in plot units
+TARGET_SD = 30.0             # common sd(x) = sd(y) of every month (plot units)
+N_STARS = 220                # loose stars sprinkled along the diagonal tails
+# baby copies of the month's drawing, per side of the diagonal: (scale, points, distance, sideways offset)
+BABIES = [(0.38, 64, 54.0, 0.0)]
+SHAPE_RADIUS = 34.0          # 95th-percentile radius of the main drawing (plot units)
+RADIUS = {"Sun": 28.0}                  # optional per-caption overrides
+TAIL_END = 68.0              # the star tails run out to this distance along the diagonal
+GAP = 3.5                    # keep stars this far from drawings
 STAR_GLYPH = {2: ("\u2665", "#ff7b9c"), 5: ("\u273f", "#f08fb5"), 12: ("\u2744", "#5aa9e6")}
 DEFAULT_STAR = ("\u2605", "#f2b705")
+SHAPE, MINI, STAR = 0, 1, 2
 
 
-def exact_fix(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
-    """Small affine tweak: exact means, SDs (ddof=1) and Pearson r.
-
-    Because the data already has r close to r_target, this barely moves anything.
-    """
-    n = len(x)
-    zx = (x - x.mean()) / x.std(ddof=1)
-    zy = (y - y.mean()) / y.std(ddof=1)
-    r0 = np.sum(zx * zy) / (n - 1)
-    resid = zy - r0 * zx
-    resid = (resid - resid.mean()) / resid.std(ddof=1)
-    zy2 = r_target * zx + np.sqrt(1 - r_target ** 2) * resid
-    return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy2
+def _near(px, py, ox, oy, gap):
+    d = np.hypot(px[:, None] - ox[None, :], py[:, None] - oy[None, :]).min(axis=1)
+    return d < gap
 
 
-def compose(fn, r_target, seed, radius=SHAPE_RADIUS, rotate=0.0):
-    """Shape drawn at uniform scale + 'stars' trailing along the diagonal.
+def layout(fn, r_target, seed, radius=SHAPE_RADIUS):
+    """Main drawing (untouched, uniform scale) + baby copies + stars on the diagonal.
 
-    The star tails carry most of the correlation, so the shape itself is hardly
-    deformed. The tail length is bisected so the natural r is already ~r_target.
-    Returns x, y, is_star.
+    The babies and stars carry the correlation, so the main drawing never has to be
+    stretched or sheared. The length of the star tails is bisected so r ~ r_target.
+    Returns x, y, kind (0 drawing, 1 baby, 2 star).
     """
     x, y = (np.asarray(v, float) for v in fn())
     dx, dy = x - x.mean(), y - y.mean()
-    if rotate:                                    # rigid rotation (no distortion)
-        c, s_ = np.cos(np.radians(rotate)), np.sin(np.radians(rotate))
-        dx, dy = c * dx - s_ * dy, s_ * dx + c * dy
-    scale = radius / np.percentile(np.hypot(dx, dy), 95)
-    sx, sy = 50 + dx * scale, 50 + dy * scale
-    u_shape = np.abs((sx - 50 + sy - 50) / np.sqrt(2))
-    lo = np.percentile(u_shape, 98) + 4
+    k = radius / np.percentile(np.hypot(dx, dy), 95)
+    sx, sy = 50 + dx * k, 50 + dy * k
+    n = len(sx)
 
     rng = np.random.default_rng(100 + seed)
-    t = rng.uniform(0, 1, N_STARS)
-    side = rng.choice([-1, 1], N_STARS)
-    perp = rng.normal(0, 2.5, N_STARS)
+    shape_u = np.percentile(np.abs((sx - 50 + sy - 50) / np.sqrt(2)), 98)
+    baby_pts = []                                   # (dx, dy, u, p) for each baby
+    for scale, npts, u, p in BABIES:
+        idx = rng.choice(n, npts, replace=False)
+        baby_pts.append(((sx[idx] - 50) * scale, (sy[idx] - 50) * scale, u, p))
 
-    def build(umax):
-        u = side * (lo + t * (umax - lo))
-        return (np.concatenate([sx, 50 + (u - perp) / np.sqrt(2)]),
-                np.concatenate([sy, 50 + (u + perp) / np.sqrt(2)]))
+    M = N_STARS * 25
+    t, side, perp1 = rng.uniform(0, 1, M), rng.choice([-1, 1], M), rng.normal(0, 1.0, M)
+    lo = shape_u + 4
 
-    a, b = lo + 1, 72.0
-    for _ in range(60):
+    def build(sigma):
+        """Babies sit on the diagonal; stars fill both tails with sideways spread sigma."""
+        bxs, bys = [], []
+        for mx, my, u, p in baby_pts:
+            for sgn in (1, -1):                      # point-mirrored on both sides
+                bxs.append(50 + sgn * (u - p) / np.sqrt(2) + mx)
+                bys.append(50 + sgn * (u + p) / np.sqrt(2) + my)
+        bx, by = np.concatenate(bxs), np.concatenate(bys)
+        ox, oy = np.concatenate([sx, bx]), np.concatenate([sy, by])
+        u = side * (lo + t * (TAIL_END - lo))
+        perp = sigma * perp1
+        px, py = 50 + (u - perp) / np.sqrt(2), 50 + (u + perp) / np.sqrt(2)
+        ok = ~_near(px, py, ox, oy, GAP) & (px > 2) & (px < 98) & (py > 2) & (py < 98)
+        px, py = px[ok][:N_STARS], py[ok][:N_STARS]
+        if len(px) < N_STARS:
+            return None
+        kind = np.concatenate([np.full(n, SHAPE), np.full(len(bx), MINI), np.full(N_STARS, STAR)])
+        return np.concatenate([ox, px]), np.concatenate([oy, py]), kind
+
+    def r_of(sigma):
+        out = build(sigma)
+        return None if out is None else np.corrcoef(out[0], out[1])[0, 1]
+
+    a, b = 0.3, 40.0                                 # wider ribbon -> lower r
+    for _ in range(50):
         mid = (a + b) / 2
-        bx, by = build(mid)
-        if np.corrcoef(bx, by)[0, 1] < r_target:
-            a = mid
-        else:
-            b = mid
-    bx, by = build((a + b) / 2)
-    is_star = np.arange(len(bx)) >= len(sx)
-    fx, fy = exact_fix(bx, by, r_target)
-    return fx, fy, is_star
+        r = r_of(mid)
+        a, b = (mid, b) if (r is not None and r > r_target) else (a, mid)
+    out = build(a)
+    return out if out is not None else build(b)
+
+
+def fix_extras(x, y, kind, r_target, mean, sd):
+    """Exact means, SDs (ddof=1) and Pearson r by applying ONE small affine map to the
+    extras (baby copies + stars) only. The main drawing is never touched, so it is never
+    sheared; the map is the closest-to-identity one that satisfies the five equations.
+    Returns x, y, residual, singular values of the 2x2 part (1,1 = no distortion)."""
+    ex = kind != SHAPE
+    ex0, ey0 = x[ex] - 50, y[ex] - 50
+
+    def full(q):
+        X, Y = x.copy(), y.copy()
+        X[ex] = 50 + q[0] * ex0 + q[1] * ey0 + q[4]
+        Y[ex] = 50 + q[2] * ex0 + q[3] * ey0 + q[5]
+        return X, Y
+
+    def F(q):
+        X, Y = full(q)
+        return np.array([X.mean() - mean[0], Y.mean() - mean[1],
+                         X.std(ddof=1) - sd[0], Y.std(ddof=1) - sd[1],
+                         np.corrcoef(X, Y)[0, 1] - r_target])
+
+    q0 = np.array([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    w = np.array([1.0, 1.0, 1.0, 1.0, 0.02, 0.02])      # translations are cheap
+    res = minimize(lambda q: np.sum(w * (q - q0) ** 2), q0,
+                   constraints=[{"type": "eq", "fun": F}], method="SLSQP",
+                   options={"maxiter": 500, "ftol": 1e-10})
+    q = res.x
+    for _ in range(30):                                  # Newton polish to machine precision
+        f = F(q)
+        if np.abs(f).max() < 1e-13:
+            break
+        J = np.empty((5, 6))
+        for j in range(6):
+            qq = q.copy()
+            qq[j] += 1e-7
+            J[:, j] = (F(qq) - f) / 1e-7
+        q = q - np.linalg.lstsq(J, f, rcond=None)[0]
+    X, Y = full(q)
+    return X, Y, float(np.abs(F(q)).max()), np.linalg.svd(q[:4].reshape(2, 2), compute_uv=False)
 
 
 def stats(x, y):
@@ -244,7 +274,7 @@ PALETTE = ["#e63946", "#d6336c", "#f77f00", "#e09f00", "#2a9d8f", "#fcbf49",
            "#3a86ff", "#7b2cbf", "#6a994e", "#bc4749", "#118ab2", "#2b9348"]
 
 
-def draw_month(pdf, year, month, x, y, is_star, caption, st, colour, out_png):
+def draw_month(pdf, year, month, x, y, kind, caption, st, colour, out_png):
     fig = plt.figure(figsize=(11, 8.5))
     fig.patch.set_facecolor("#fbf8f1")
 
@@ -259,10 +289,11 @@ def draw_month(pdf, year, month, x, y, is_star, caption, st, colour, out_png):
     ax = fig.add_axes([0.06, 0.46, 0.42, 0.42])
     ax.set_facecolor("white")
     px, py = 0.08 * np.ptp(x), 0.08 * np.ptp(y)
-    ax.scatter(x[~is_star], y[~is_star], s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
+    ax.scatter(x[kind == MINI], y[kind == MINI], s=16, color=colour, edgecolor="white", linewidth=0.4, zorder=4)
+    ax.scatter(x[kind == SHAPE], y[kind == SHAPE], s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
     glyph, gcol = STAR_GLYPH.get(month, DEFAULT_STAR)
-    for u, v in zip(x[is_star], y[is_star]):
-        ax.text(u, v, glyph, color=gcol, fontsize=10, ha="center", va="center",
+    for u, v in zip(x[kind == STAR], y[kind == STAR]):
+        ax.text(u, v, glyph, color=gcol, fontsize=7.5, ha="center", va="center",
                 fontfamily="DejaVu Sans", zorder=2)
     xs = np.array([x.min(), x.max()])
     ax.plot(xs, st["slope"] * xs + st["intercept"], color="#222", lw=1.2, ls="--", zorder=2)
@@ -289,7 +320,7 @@ def draw_month(pdf, year, month, x, y, is_star, caption, st, colour, out_png):
         pn.text(0, yy, k, fontsize=11, color="#555", va="center")
         pn.text(1, yy, f"{v:.2f}", fontsize=11, color="#222", ha="right", va="center",
                 fontfamily="monospace", fontweight="bold" if k == "R²" else "normal")
-    pn.text(0, -0.02, f"n = {len(x)} points ({int((~is_star).sum())} shape + {int(is_star.sum())} {glyph})", fontsize=9, color="#888", va="center")
+    pn.text(0, -0.02, f"n = {len(x)} points ({int((kind == SHAPE).sum())} drawing + {int((kind == MINI).sum())} baby + {int((kind == STAR).sum())} {glyph})", fontsize=9, color="#888", va="center")
 
     # day grid
     cal = calendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
@@ -324,16 +355,23 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
+    natural = [layout(fn, a.r, m, RADIUS.get(cap, SHAPE_RADIUS))
+               for m, (fn, cap) in enumerate(SHAPES, start=1)]
+    mean, sd = (50.0, 50.0), (TARGET_SD, TARGET_SD)
+
     rows, all_stats = [], []
     with PdfPages(os.path.join(a.out, f"datasaurus_calendar_{a.year}.pdf")) as pdf:
-        for m, ((fn, caption), colour) in enumerate(zip(SHAPES, PALETTE), start=1):
-            x, y, is_star = compose(fn, a.r, m, **SHAPE_OPTS.get(fn, {}))
+        for m, ((fn, caption), colour, (x, y, kind)) in enumerate(zip(SHAPES, PALETTE, natural), start=1):
+            r_nat = np.corrcoef(x, y)[0, 1]
+            x, y, resid, sv = fix_extras(x, y, kind, a.r, mean, sd)
             st = stats(x, y)
             all_stats.append(st)
-            draw_month(pdf, a.year, m, x, y, is_star, caption, st, colour,
+            print(f"{calendar.month_name[m]:9s} {caption:18s} natural r={r_nat:.3f}  resid={resid:.1e}  extras map sv={sv[0]:.2f},{sv[1]:.2f}  "
+                  f"off-plot={int(((x < 0) | (x > 100) | (y < 0) | (y > 100)).sum())}")
+            draw_month(pdf, a.year, m, x, y, kind, caption, st, colour,
                        os.path.join(a.out, f"{m:02d}_{calendar.month_name[m].lower()}.png"))
-            rows += [(calendar.month_name[m], f"{u:.6f}", f"{v:.6f}", "star" if k else "shape")
-                     for u, v, k in zip(x, y, is_star)]
+            rows += [(calendar.month_name[m], f"{u:.6f}", f"{v:.6f}", ("shape", "baby", "star")[int(k)])
+                     for u, v, k in zip(x, y, kind)]
 
     with open(os.path.join(a.out, "datasets.csv"), "w", newline="") as f:
         w = csv.writer(f)
