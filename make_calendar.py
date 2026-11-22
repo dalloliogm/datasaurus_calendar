@@ -162,6 +162,65 @@ def match_stats(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
     return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy
 
 
+N_STARS = 60
+SHAPE_RADIUS = 24.0          # 95th-percentile radius of the shape, in plot units
+STAR_GLYPH = {2: ("\u2665", "#ff7b9c"), 5: ("\u273f", "#f08fb5"), 12: ("\u2744", "#5aa9e6")}
+DEFAULT_STAR = ("\u2605", "#f2b705")
+
+
+def exact_fix(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
+    """Small affine tweak: exact means, SDs (ddof=1) and Pearson r.
+
+    Because the data already has r close to r_target, this barely moves anything.
+    """
+    n = len(x)
+    zx = (x - x.mean()) / x.std(ddof=1)
+    zy = (y - y.mean()) / y.std(ddof=1)
+    r0 = np.sum(zx * zy) / (n - 1)
+    resid = zy - r0 * zx
+    resid = (resid - resid.mean()) / resid.std(ddof=1)
+    zy2 = r_target * zx + np.sqrt(1 - r_target ** 2) * resid
+    return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy2
+
+
+def compose(fn, r_target, seed):
+    """Shape drawn at uniform scale + 'stars' trailing along the diagonal.
+
+    The star tails carry most of the correlation, so the shape itself is hardly
+    deformed. The tail length is bisected so the natural r is already ~r_target.
+    Returns x, y, is_star.
+    """
+    x, y = (np.asarray(v, float) for v in fn())
+    dx, dy = x - x.mean(), y - y.mean()
+    scale = SHAPE_RADIUS / np.percentile(np.hypot(dx, dy), 95)
+    sx, sy = 50 + dx * scale, 50 + dy * scale
+    u_shape = np.abs((sx - 50 + sy - 50) / np.sqrt(2))
+    lo = np.percentile(u_shape, 98) + 4
+
+    rng = np.random.default_rng(100 + seed)
+    t = rng.uniform(0, 1, N_STARS)
+    side = rng.choice([-1, 1], N_STARS)
+    perp = rng.normal(0, 2.5, N_STARS)
+
+    def build(umax):
+        u = side * (lo + t * (umax - lo))
+        return (np.concatenate([sx, 50 + (u - perp) / np.sqrt(2)]),
+                np.concatenate([sy, 50 + (u + perp) / np.sqrt(2)]))
+
+    a, b = lo + 1, 72.0
+    for _ in range(60):
+        mid = (a + b) / 2
+        bx, by = build(mid)
+        if np.corrcoef(bx, by)[0, 1] < r_target:
+            a = mid
+        else:
+            b = mid
+    bx, by = build((a + b) / 2)
+    is_star = np.arange(len(bx)) >= len(sx)
+    fx, fy = exact_fix(bx, by, r_target)
+    return fx, fy, is_star
+
+
 def stats(x, y):
     r = np.corrcoef(x, y)[0, 1]
     slope, icpt = np.polyfit(x, y, 1)
@@ -174,7 +233,7 @@ PALETTE = ["#e63946", "#d6336c", "#f77f00", "#e09f00", "#2a9d8f", "#fcbf49",
            "#3a86ff", "#7b2cbf", "#6a994e", "#bc4749", "#118ab2", "#2b9348"]
 
 
-def draw_month(pdf, year, month, x, y, caption, st, colour, out_png):
+def draw_month(pdf, year, month, x, y, is_star, caption, st, colour, out_png):
     fig = plt.figure(figsize=(11, 8.5))
     fig.patch.set_facecolor("#fbf8f1")
 
@@ -189,7 +248,11 @@ def draw_month(pdf, year, month, x, y, caption, st, colour, out_png):
     ax = fig.add_axes([0.06, 0.46, 0.42, 0.42])
     ax.set_facecolor("white")
     px, py = 0.08 * np.ptp(x), 0.08 * np.ptp(y)
-    ax.scatter(x, y, s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
+    ax.scatter(x[~is_star], y[~is_star], s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
+    glyph, gcol = STAR_GLYPH.get(month, DEFAULT_STAR)
+    for u, v in zip(x[is_star], y[is_star]):
+        ax.text(u, v, glyph, color=gcol, fontsize=10, ha="center", va="center",
+                fontfamily="DejaVu Sans", zorder=2)
     xs = np.array([x.min(), x.max()])
     ax.plot(xs, st["slope"] * xs + st["intercept"], color="#222", lw=1.2, ls="--", zorder=2)
     lo = min(0, x.min() - 3, y.min() - 3)
@@ -215,7 +278,7 @@ def draw_month(pdf, year, month, x, y, caption, st, colour, out_png):
         pn.text(0, yy, k, fontsize=11, color="#555", va="center")
         pn.text(1, yy, f"{v:.2f}", fontsize=11, color="#222", ha="right", va="center",
                 fontfamily="monospace", fontweight="bold" if k == "R²" else "normal")
-    pn.text(0, -0.02, f"n = {len(x)} points", fontsize=9, color="#888", va="center")
+    pn.text(0, -0.02, f"n = {len(x)} points ({int((~is_star).sum())} shape + {int(is_star.sum())} {glyph})", fontsize=9, color="#888", va="center")
 
     # day grid
     cal = calendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
@@ -253,17 +316,17 @@ def main():
     rows, all_stats = [], []
     with PdfPages(os.path.join(a.out, f"datasaurus_calendar_{a.year}.pdf")) as pdf:
         for m, ((fn, caption), colour) in enumerate(zip(SHAPES, PALETTE), start=1):
-            x, y = fn()
-            x, y = match_stats(np.asarray(x, float), np.asarray(y, float), a.r)
+            x, y, is_star = compose(fn, a.r, m)
             st = stats(x, y)
             all_stats.append(st)
-            draw_month(pdf, a.year, m, x, y, caption, st, colour,
+            draw_month(pdf, a.year, m, x, y, is_star, caption, st, colour,
                        os.path.join(a.out, f"{m:02d}_{calendar.month_name[m].lower()}.png"))
-            rows += [(calendar.month_name[m], f"{u:.6f}", f"{v:.6f}") for u, v in zip(x, y)]
+            rows += [(calendar.month_name[m], f"{u:.6f}", f"{v:.6f}", "star" if k else "shape")
+                     for u, v, k in zip(x, y, is_star)]
 
     with open(os.path.join(a.out, "datasets.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["month", "x", "y"])
+        w.writerow(["month", "x", "y", "kind"])
         w.writerows(rows)
 
     keys = all_stats[0].keys()
