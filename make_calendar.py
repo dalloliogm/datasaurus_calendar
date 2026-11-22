@@ -25,8 +25,8 @@ import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
 N = 120
-TARGET_MEAN = (54.26, 47.83)   # Datasaurus means
-TARGET_SD = (16.76, 26.93)     # Datasaurus SDs
+TARGET_MEAN = (50.0, 50.0)
+TARGET_SD = (20.0, 20.0)       # equal SDs so the diagonal stretch is symmetric
 
 
 # --------------------------------------------------------------------------
@@ -145,14 +145,21 @@ SHAPES = [
 
 # --------------------------------------------------------------------------
 def match_stats(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
-    """Affine map giving exactly the requested means, SDs and Pearson r."""
-    zx = (x - x.mean()) / x.std()
-    zy = (y - y.mean()) / y.std()
-    r0 = np.mean(zx * zy)
-    resid = zy - r0 * zx
-    resid = (resid - resid.mean()) / resid.std()   # unit variance, orthogonal to zx
-    zy2 = r_target * zx + np.sqrt(1 - r_target ** 2) * resid
-    return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy2
+    """Exact means, SDs and Pearson r, by stretching the shape along the diagonal.
+
+    The shape's own axes (s, t) are whitened, then mapped so that s runs along
+    the y = x diagonal and t across it:  zx = p s + q t,  zy = p s - q t with
+    p = sqrt((1+r)/2), q = sqrt((1-r)/2).  That gives var = 1 for both and
+    corr = r, and keeps right angles of the shape intact up to a uniform
+    stretch (a vertical shear would distort it far more).
+    """
+    s = (x - x.mean()) / x.std()
+    t = (y - y.mean()) / y.std()
+    t = t - np.mean(s * t) * s
+    t = (t - t.mean()) / t.std()
+    p, q = np.sqrt((1 + r_target) / 2), np.sqrt((1 - r_target) / 2)
+    zx, zy = p * s + q * t, p * s - q * t
+    return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy
 
 
 def stats(x, y):
@@ -179,21 +186,24 @@ def draw_month(pdf, year, month, x, y, caption, st, colour, out_png):
              fontsize=10.5, color="#555", style="italic")
 
     # scatter plot
-    ax = fig.add_axes([0.06, 0.50, 0.58, 0.37])
+    ax = fig.add_axes([0.06, 0.46, 0.42, 0.42])
     ax.set_facecolor("white")
     px, py = 0.08 * np.ptp(x), 0.08 * np.ptp(y)
     ax.scatter(x, y, s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
     xs = np.array([x.min(), x.max()])
     ax.plot(xs, st["slope"] * xs + st["intercept"], color="#222", lw=1.2, ls="--", zorder=2)
-    ax.set_xlim(x.min() - px, x.max() + px)
-    ax.set_ylim(y.min() - py, y.max() + py)
+    lo = min(0, x.min() - 3, y.min() - 3)
+    hi = max(100, x.max() + 3, y.max() + 3)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    ax.set_aspect("equal")
     ax.grid(color="#eee", lw=0.6)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     ax.tick_params(labelsize=7, colors="#888")
 
     # stats panel
-    pn = fig.add_axes([0.68, 0.50, 0.26, 0.37])
+    pn = fig.add_axes([0.62, 0.46, 0.32, 0.42])
     pn.axis("off")
     rows = [("mean x", st["mean_x"]), ("mean y", st["mean_y"]),
             ("sd x", st["sd_x"]), ("sd y", st["sd_y"]),
@@ -209,7 +219,7 @@ def draw_month(pdf, year, month, x, y, caption, st, colour, out_png):
 
     # day grid
     cal = calendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
-    g = fig.add_axes([0.06, 0.05, 0.88, 0.39])
+    g = fig.add_axes([0.06, 0.04, 0.88, 0.37])
     g.set_xlim(0, 7)
     g.set_ylim(len(cal) + 1, 0)
     g.axis("off")
@@ -234,8 +244,8 @@ def draw_month(pdf, year, month, x, y, caption, st, colour, out_png):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--year", type=int, default=2027)
-    ap.add_argument("--r", type=float, default=-0.06,
-                    help="shared Pearson r (-0.06 = Datasaurus, shapes stay recognisable; 0.816 = Anscombe, R²≈0.67 but shapes get sheared)")
+    ap.add_argument("--r", type=float, default=0.816,
+                    help="shared Pearson r (0.816 = Anscombe, R²≈0.67; -0.06 = Datasaurus, R²≈0)")
     ap.add_argument("--out", default="out")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)

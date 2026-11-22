@@ -6,8 +6,9 @@ has the same mean, SD, Pearson r, regression line and R² (equal to floating-poi
 ```bash
 pip install numpy matplotlib
 python make_calendar.py --year 2027          # -> out/datasaurus_calendar_2027.pdf, PNGs, datasets.csv
-python make_calendar.py --r 0.816            # Anscombe-style R² (~0.67); shapes get sheared
+python make_calendar.py --r 0.816            # default: Anscombe-style R² (~0.67)
 ```
 
-Each shape is generated, then an affine "stats fix" sets the exact means, SDs and r.
-Default r = -0.06 (Datasaurus), so R² = 0.0036 and shapes stay recognisable.
+Each shape is generated, then stretched symmetrically along the y = x diagonal so that
+means, SDs and Pearson r match exactly. Default r = 0.816 (Anscombe), so R² = 0.67 and
+every month has r > 0.8. `--r -0.06` gives the near-zero Datasaurus-style correlation.
