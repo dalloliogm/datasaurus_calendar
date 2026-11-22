@@ -129,6 +129,11 @@ def tree():                        # Dec  (zig-zag Christmas tree + trunk)
     return along_path(px, py, jitter=0.05, seed=11)
 
 
+# per-shape overrides for compose(): radius = size, rotate = rigid rotation in degrees.
+# The dino is tilted clockwise so that it climbs along the trend (positive r of its own);
+# that lets it be larger and keeps the final stats fix from shearing it.
+SHAPE_OPTS = {dino: dict(radius=30, rotate=-32)}
+
 # month -> (shape fn, caption)
 SHAPES = [
     (dino, "Datasaurus"),
@@ -186,7 +191,7 @@ def exact_fix(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
     return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy2
 
 
-def compose(fn, r_target, seed):
+def compose(fn, r_target, seed, radius=SHAPE_RADIUS, rotate=0.0):
     """Shape drawn at uniform scale + 'stars' trailing along the diagonal.
 
     The star tails carry most of the correlation, so the shape itself is hardly
@@ -195,7 +200,10 @@ def compose(fn, r_target, seed):
     """
     x, y = (np.asarray(v, float) for v in fn())
     dx, dy = x - x.mean(), y - y.mean()
-    scale = SHAPE_RADIUS / np.percentile(np.hypot(dx, dy), 95)
+    if rotate:                                    # rigid rotation (no distortion)
+        c, s_ = np.cos(np.radians(rotate)), np.sin(np.radians(rotate))
+        dx, dy = c * dx - s_ * dy, s_ * dx + c * dy
+    scale = radius / np.percentile(np.hypot(dx, dy), 95)
     sx, sy = 50 + dx * scale, 50 + dy * scale
     u_shape = np.abs((sx - 50 + sy - 50) / np.sqrt(2))
     lo = np.percentile(u_shape, 98) + 4
@@ -319,7 +327,7 @@ def main():
     rows, all_stats = [], []
     with PdfPages(os.path.join(a.out, f"datasaurus_calendar_{a.year}.pdf")) as pdf:
         for m, ((fn, caption), colour) in enumerate(zip(SHAPES, PALETTE), start=1):
-            x, y, is_star = compose(fn, a.r, m)
+            x, y, is_star = compose(fn, a.r, m, **SHAPE_OPTS.get(fn, {}))
             st = stats(x, y)
             all_stats.append(st)
             draw_month(pdf, a.year, m, x, y, is_star, caption, st, colour,
