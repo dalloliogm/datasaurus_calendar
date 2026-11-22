@@ -1,224 +1,111 @@
 #!/usr/bin/env python3
-"""Datasaurus / Anscombe-inspired calendar.
+"""Datasaurus Dozen calendar.
 
-Every month shows a different scatter-plot shape, but all twelve datasets have
-*exactly* the same mean(x), mean(y), sd(x), sd(y), Pearson r and therefore the
-same linear-regression line and R^2.
+Each month shows one of the 12 real Datasaurus Dozen datasets (Matejka &
+Fitzmaurice, 2017; data/datasaurus_dozen.csv, from the datasauRus package).
+The dozen on its own has r = -0.06. To get a strong, identical correlation
+every month without distorting the shapes, the *whole page* is the plot:
+"stars" are added across the page -- a band along the page diagonal that
+carries the correlation, plus a sprinkling of background stars -- and a tiny
+final affine tweak makes mean(x), mean(y), sd(x), sd(y), Pearson r (hence the
+regression line and R^2) exactly identical in all twelve months.
 
-How the stats are matched: each shape is generated as a point cloud, then an
-affine "stats fix" is applied (standardise, re-mix the residual so that the
-correlation equals TARGET_R, rescale to the target means/SDs). Because the fix
-is affine, the shape stays recognisable (it is only sheared/stretched), and the
-statistics are equal to floating-point precision rather than "close enough".
+Plot units: the page is 110 x 85 units (1 unit = 0.1 inch).
 
-Usage:  python make_calendar.py [--year 2027] [--r 0.816] [--out out]
+Usage: python make_calendar.py [--year 2027] [--r 0.816] [--out out]
 """
 import argparse
 import calendar
 import csv
 import os
+from collections import defaultdict
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
-
-N = 120
-TARGET_MEAN = (50.0, 50.0)
-TARGET_SD = (20.0, 20.0)       # equal SDs so the diagonal stretch is symmetric
+from matplotlib.colors import to_rgb
+from matplotlib.patches import FancyBboxPatch, Rectangle
 
 
-# --------------------------------------------------------------------------
-# Shapes. Each returns (x, y) arrays of N points in arbitrary units.
-# --------------------------------------------------------------------------
-def _rng(seed):
-    return np.random.default_rng(seed)
+def tint(c, k=0.55):
+    """Blend colour c towards white by k."""
+    return tuple(v + (1 - v) * k for v in to_rgb(c))
 
+W, H = 110.0, 85.0
+SHAPE_BOX = (48.0, 21.0, 58.0)        # x0, y0, side of the square holding a dozen shape
+N_BAND, N_BG = 2500, 150             # diagonal-ribbon stars, background stars
+MIN_GAP = 4.5                        # keep stars this far from shape points
 
-def along_path(px, py, n=N, jitter=0.0, seed=0):
-    """n points spread evenly (by arc length) along a polyline."""
-    px, py = np.asarray(px, float), np.asarray(py, float)
-    seg = np.hypot(np.diff(px), np.diff(py))
-    s = np.concatenate([[0], np.cumsum(seg)])
-    t = np.linspace(0, s[-1], n)
-    x, y = np.interp(t, s, px), np.interp(t, s, py)
-    r = _rng(seed)
-    return x + r.normal(0, jitter, n), y + r.normal(0, jitter, n)
-
-
-def linear():                      # Jan  - Anscombe I (noisy blob)
-    r = _rng(1)
-    return r.normal(0, 1, N), r.normal(0, 1, N)
-
-
-def parabola():                    # Mar  - Anscombe II
-    r = _rng(2)
-    x = np.sort(r.uniform(0, 10, N))
-    return x, -0.13 * (x - 5) ** 2 + 9 + r.normal(0, 0.12, N)
-
-
-def outlier_line():                # Apr  - Anscombe III (flat line + outlier)
-    r = _rng(3)
-    k = 8                                  # a few outliers keep the plot readable
-    x = np.sort(r.uniform(0, 10, N - k))
-    y = 5 + r.normal(0, 0.05, N - k)
-    return (np.append(x, r.uniform(8.5, 9.5, k)),
-            np.append(y, r.uniform(8, 13, k)))
-
-
-def vertical_outlier():            # Nov  - Anscombe IV
-    r = _rng(4)
-    k = 16                                 # a second, smaller column
-    x = np.full(N - k, 4.0) + r.normal(0, 0.02, N - k)
-    y = r.uniform(3, 9, N - k)
-    return (np.append(x, 8 + r.normal(0, 0.02, k)),
-            np.append(y, r.uniform(5, 9, k)))
-
-
-def heart():                       # Feb
-    t = np.linspace(0, 2 * np.pi, N, endpoint=False)
-    x = 16 * np.sin(t) ** 3
-    y = 13 * np.cos(t) - 5 * np.cos(2 * t) - 2 * np.cos(3 * t) - np.cos(4 * t)
-    return x + _rng(5).normal(0, .15, N), y + _rng(6).normal(0, .15, N)
-
-
-def flower():                      # May  (rose curve, 5 petals)
-    t = np.linspace(0, 2 * np.pi, N, endpoint=False)
-    rad = np.abs(np.cos(2.5 * t)) + 0.15
-    return rad * np.cos(t), rad * np.sin(t)
-
-
-def ring():                        # Jun  (sun / circle)
-    t = np.linspace(0, 2 * np.pi, N, endpoint=False)
-    return np.cos(t) + _rng(7).normal(0, .02, N), np.sin(t) + _rng(8).normal(0, .02, N)
-
-
-def sine():                        # Jul
-    x = np.linspace(0, 4 * np.pi, N)
-    return x, np.sin(x) * 2 + 0.6 * x
-
-
-def clusters():                    # Aug
-    r = _rng(9)
-    h = N // 2
-    return (np.concatenate([r.normal(2, .8, h), r.normal(8, .8, N - h)]),
-            np.concatenate([r.normal(2, .8, h), r.normal(8, .8, N - h)]))
-
-
-def spiral():                      # Sep
-    t = np.linspace(0.3, 4.2 * np.pi, N)
-    return t * np.cos(t), t * np.sin(t)
-
-
-def x_shape():                     # Oct
-    return along_path([0, 10, 5, 0, 10], [0, 10, 5, 10, 0], jitter=0.12, seed=10)
-
-
-def tree():                        # Dec  (zig-zag Christmas tree + trunk)
-    px = [5, 1, 3, 0, 3.5, 0.5, 4.5, 4.5, 5.5, 5.5, 4.5,
-          9.5, 6.5, 10, 7, 10.5, 6.5, 9.5, 5.5, 5.5]
-    py = [14, 10, 10, 6.5, 6.5, 3, 3, 0, 0, 3, 3,
-          3, 6.5, 6.5, 10, 10, 10, 10, 14, 14]
-    # simple, clean silhouette instead of the scribble above
-    px = [5, 1.5, 3.5, 0, 3, -0.5, 4.2, 4.2, 5.8, 5.8, 10.5, 7, 10, 6.5, 8.5, 5]
-    py = [14, 10, 10, 6.5, 6.5, 3, 3, 0, 0, 3, 3, 6.5, 6.5, 10, 10, 14]
-    return along_path(px, py, jitter=0.05, seed=11)
-
-
-# month -> (shape fn, caption)
-SHAPES = [
-    (linear, "Anscombe I (the humble blob)"),
-    (heart, "Heart"),
-    (parabola, "Anscombe II"),
-    (outlier_line, "Anscombe III"),
-    (flower, "Flower"),
-    (ring, "Sun"),
-    (sine, "Wave"),
-    (clusters, "Binary star"),
-    (spiral, "Spiral"),
-    (x_shape, "X marks the spot"),
-    (vertical_outlier, "Anscombe IV"),
-    (tree, "Tree"),
+MONTHS = [  # (dataset, colour)
+    ("dino", "#e63946"), ("star", "#d6336c"), ("bullseye", "#f77f00"),
+    ("circle", "#e09f00"), ("x_shape", "#2a9d8f"), ("dots", "#3a86ff"),
+    ("h_lines", "#7b2cbf"), ("v_lines", "#6a994e"), ("wide_lines", "#bc4749"),
+    ("high_lines", "#118ab2"), ("slant_up", "#2b9348"), ("slant_down", "#8d5a97"),
 ]
+GLYPH = {2: "♥", 6: "☀", 12: "❄"}      # others: star
+STAR, STAR_COL, BG_COL = "★", "#f2b705", "#9aa7c7"
+
+
+def load_dozen(path):
+    d = defaultdict(list)
+    with open(path) as f:
+        for row in csv.DictReader(f):
+            d[row["dataset"]].append((float(row["x"]), float(row["y"])))
+    return {k: np.array(v) for k, v in d.items()}
 
 
 # --------------------------------------------------------------------------
-def match_stats(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
-    """Exact means, SDs and Pearson r, by stretching the shape along the diagonal.
-
-    The shape's own axes (s, t) are whitened, then mapped so that s runs along
-    the y = x diagonal and t across it:  zx = p s + q t,  zy = p s - q t with
-    p = sqrt((1+r)/2), q = sqrt((1-r)/2).  That gives var = 1 for both and
-    corr = r, and keeps right angles of the shape intact up to a uniform
-    stretch (a vertical shear would distort it far more).
-    """
-    s = (x - x.mean()) / x.std()
-    t = (y - y.mean()) / y.std()
-    t = t - np.mean(s * t) * s
-    t = (t - t.mean()) / t.std()
-    p, q = np.sqrt((1 + r_target) / 2), np.sqrt((1 - r_target) / 2)
-    zx, zy = p * s + q * t, p * s - q * t
-    return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy
+def far_from_shape(px, py, sx, sy):
+    d = np.hypot(px[:, None] - sx[None, :], py[:, None] - sy[None, :]).min(axis=1)
+    return d >= MIN_GAP
 
 
-N_STARS = 60
-SHAPE_RADIUS = 24.0          # 95th-percentile radius of the shape, in plot units
-STAR_GLYPH = {2: ("\u2665", "#ff7b9c"), 5: ("\u273f", "#f08fb5"), 12: ("\u2744", "#5aa9e6")}
-DEFAULT_STAR = ("\u2605", "#f2b705")
+def compose(pts, r_target, seed):
+    """Real dozen shape + page-wide stars. Returns natural x, y, kind(0 shape, 1 band, 2 bg)."""
+    x0, y0, side = SHAPE_BOX
+    sx, sy = x0 + pts[:, 0] / 100 * side, y0 + pts[:, 1] / 100 * side
+    rng = np.random.default_rng(1000 + seed)
+    nrm = np.array([-H, W]) / np.hypot(W, H)
+
+    # background stars: uniform over the page
+    m = N_BG * 12
+    bx, by = rng.uniform(2, W - 2, m), rng.uniform(2, H - 2, m)
+    ok = far_from_shape(bx, by, sx, sy)
+    bx, by = bx[ok][:N_BG], by[ok][:N_BG]
+    assert len(bx) == N_BG
+
+    # band stars along the page diagonal; spread (sigma) is bisected to hit r
+    M = N_BAND * 16
+    t, z = rng.uniform(0.01, 0.99, M), rng.normal(0, 1, M)
+
+    def build(sigma):
+        px = t * W + sigma * z * nrm[0]
+        py = t * H + sigma * z * nrm[1]
+        ok = (px > 1) & (px < W - 1) & (py > 1) & (py < H - 1) & far_from_shape(px, py, sx, sy)
+        px, py = px[ok][:N_BAND], py[ok][:N_BAND]
+        assert len(px) == N_BAND, "increase the candidate pool"
+        return (np.concatenate([sx, px, bx]), np.concatenate([sy, py, by]),
+                np.concatenate([np.zeros(len(sx)), np.ones(len(px)), np.full(len(bx), 2)]))
+
+    a, b = 0.2, 45.0
+    for _ in range(50):
+        mid = (a + b) / 2
+        x, y, _ = build(mid)
+        a, b = (mid, b) if np.corrcoef(x, y)[0, 1] > r_target else (a, mid)
+    return build((a + b) / 2)
 
 
-def exact_fix(x, y, r_target, mean=TARGET_MEAN, sd=TARGET_SD):
-    """Small affine tweak: exact means, SDs (ddof=1) and Pearson r.
-
-    Because the data already has r close to r_target, this barely moves anything.
-    """
+def exact_fix(x, y, r_target, mean, sd):
+    """Small affine tweak: exact means, SDs (ddof=1) and Pearson r."""
     n = len(x)
     zx = (x - x.mean()) / x.std(ddof=1)
     zy = (y - y.mean()) / y.std(ddof=1)
-    r0 = np.sum(zx * zy) / (n - 1)
-    resid = zy - r0 * zx
+    resid = zy - (np.sum(zx * zy) / (n - 1)) * zx
     resid = (resid - resid.mean()) / resid.std(ddof=1)
     zy2 = r_target * zx + np.sqrt(1 - r_target ** 2) * resid
     return mean[0] + sd[0] * zx, mean[1] + sd[1] * zy2
-
-
-def compose(fn, r_target, seed):
-    """Shape drawn at uniform scale + 'stars' trailing along the diagonal.
-
-    The star tails carry most of the correlation, so the shape itself is hardly
-    deformed. The tail length is bisected so the natural r is already ~r_target.
-    Returns x, y, is_star.
-    """
-    x, y = (np.asarray(v, float) for v in fn())
-    dx, dy = x - x.mean(), y - y.mean()
-    scale = SHAPE_RADIUS / np.percentile(np.hypot(dx, dy), 95)
-    sx, sy = 50 + dx * scale, 50 + dy * scale
-    u_shape = np.abs((sx - 50 + sy - 50) / np.sqrt(2))
-    lo = np.percentile(u_shape, 98) + 4
-
-    rng = np.random.default_rng(100 + seed)
-    t = rng.uniform(0, 1, N_STARS)
-    side = rng.choice([-1, 1], N_STARS)
-    perp = rng.normal(0, 2.5, N_STARS)
-
-    def build(umax):
-        u = side * (lo + t * (umax - lo))
-        return (np.concatenate([sx, 50 + (u - perp) / np.sqrt(2)]),
-                np.concatenate([sy, 50 + (u + perp) / np.sqrt(2)]))
-
-    a, b = lo + 1, 72.0
-    for _ in range(60):
-        mid = (a + b) / 2
-        bx, by = build(mid)
-        if np.corrcoef(bx, by)[0, 1] < r_target:
-            a = mid
-        else:
-            b = mid
-    bx, by = build((a + b) / 2)
-    is_star = np.arange(len(bx)) >= len(sx)
-    fx, fy = exact_fix(bx, by, r_target)
-    return fx, fy, is_star
 
 
 def stats(x, y):
@@ -229,75 +116,73 @@ def stats(x, y):
 
 
 # --------------------------------------------------------------------------
-PALETTE = ["#e63946", "#d6336c", "#f77f00", "#e09f00", "#2a9d8f", "#fcbf49",
-           "#3a86ff", "#7b2cbf", "#6a994e", "#bc4749", "#118ab2", "#2b9348"]
-
-
-def draw_month(pdf, year, month, x, y, is_star, caption, st, colour, out_png):
+def draw_month(pdf, year, month, x, y, kind, name, st, colour, out_png):
     fig = plt.figure(figsize=(11, 8.5))
     fig.patch.set_facecolor("#fbf8f1")
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
+    ax.axis("off")
 
-    # title
-    fig.text(0.06, 0.94, calendar.month_name[month].upper(), fontsize=34,
-             fontweight="bold", color=colour, va="center")
-    fig.text(0.94, 0.94, str(year), fontsize=34, color="#555", ha="right", va="center")
-    fig.text(0.06, 0.895, f"“{caption}” — same mean, SD, correlation and R² as every other month",
-             fontsize=10.5, color="#555", style="italic")
+    for g in range(0, 111, 10):
+        ax.plot([g, g], [0, H], color="#ece6d6", lw=0.5, zorder=0)
+    for g in range(0, 86, 10):
+        ax.plot([0, W], [g, g], color="#ece6d6", lw=0.5, zorder=0)
 
-    # scatter plot
-    ax = fig.add_axes([0.06, 0.46, 0.42, 0.42])
-    ax.set_facecolor("white")
-    px, py = 0.08 * np.ptp(x), 0.08 * np.ptp(y)
-    ax.scatter(x[~is_star], y[~is_star], s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
-    glyph, gcol = STAR_GLYPH.get(month, DEFAULT_STAR)
-    for u, v in zip(x[is_star], y[is_star]):
-        ax.text(u, v, glyph, color=gcol, fontsize=10, ha="center", va="center",
-                fontfamily="DejaVu Sans", zorder=2)
-    xs = np.array([x.min(), x.max()])
-    ax.plot(xs, st["slope"] * xs + st["intercept"], color="#222", lw=1.2, ls="--", zorder=2)
-    lo = min(0, x.min() - 3, y.min() - 3)
-    hi = max(100, x.max() + 3, y.max() + 3)
-    ax.set_xlim(lo, hi)
-    ax.set_ylim(lo, hi)
-    ax.set_aspect("equal")
-    ax.grid(color="#eee", lw=0.6)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    ax.tick_params(labelsize=7, colors="#888")
+    ax.plot([0, W], [st["intercept"], st["intercept"] + st["slope"] * W],
+            color="#222", lw=1.1, ls="--", zorder=2, alpha=0.7)
 
-    # stats panel
-    pn = fig.add_axes([0.62, 0.46, 0.32, 0.42])
-    pn.axis("off")
-    rows = [("mean x", st["mean_x"]), ("mean y", st["mean_y"]),
-            ("sd x", st["sd_x"]), ("sd y", st["sd_y"]),
-            ("Pearson r", st["r"]), ("R²", st["r2"]),
-            ("slope", st["slope"]), ("intercept", st["intercept"])]
-    pn.text(0, 1, "IDENTICAL EVERY MONTH", fontsize=9, fontweight="bold", color="#444", va="top")
-    for i, (k, v) in enumerate(rows):
-        yy = 0.86 - i * 0.105
-        pn.text(0, yy, k, fontsize=11, color="#555", va="center")
-        pn.text(1, yy, f"{v:.2f}", fontsize=11, color="#222", ha="right", va="center",
-                fontfamily="monospace", fontweight="bold" if k == "R²" else "normal")
-    pn.text(0, -0.02, f"n = {len(x)} points ({int((~is_star).sum())} shape + {int(is_star.sum())} {glyph})", fontsize=9, color="#888", va="center")
+    glyph = GLYPH.get(month, STAR)
+    for u, v in zip(x[kind == 1], y[kind == 1]):
+        ax.text(u, v, glyph, color=STAR_COL if glyph == STAR else colour, fontsize=12,
+                ha="center", va="center", fontfamily="DejaVu Sans", zorder=3, alpha=0.95)
+    for u, v in zip(x[kind == 2], y[kind == 2]):
+        ax.text(u, v, "✦", color=BG_COL, fontsize=7, ha="center", va="center",
+                fontfamily="DejaVu Sans", zorder=1, alpha=0.8)
+    ax.scatter(x[kind == 0], y[kind == 0], s=40, color=colour, edgecolor="#1b1b1b",
+               linewidth=0.7, zorder=4)
 
-    # day grid
-    cal = calendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
-    g = fig.add_axes([0.06, 0.04, 0.88, 0.37])
-    g.set_xlim(0, 7)
-    g.set_ylim(len(cal) + 1, 0)
-    g.axis("off")
-    for i, d in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
-        g.text(i + 0.5, 0.5, d, ha="center", va="center", fontsize=10,
-               fontweight="bold", color=colour)
-    for r_i, week in enumerate(cal, start=1):
+    # calendar card
+    ax.add_patch(FancyBboxPatch((3, 3), 41, 79, boxstyle="round,pad=0,rounding_size=2",
+                                fc="white", ec="#d9d2bf", lw=0.8, alpha=0.74, zorder=5))
+    ax.text(5, 77, calendar.month_name[month].upper(), fontsize=27, fontweight="bold",
+            color=colour, va="center", zorder=6)
+    ax.text(42, 77, str(year), fontsize=15, color="#666", ha="right", va="center", zorder=6)
+    ax.text(5, 72.6, f"Datasaurus Dozen: “{name}”", fontsize=9.5, style="italic",
+            color="#555", va="center", zorder=6)
+
+    cal = calendar.Calendar(0).monthdayscalendar(year, month)
+    cw, ch, gx, gy = 5.5, 6.6, 4.5, 68.0
+    for i, d in enumerate(["M", "T", "W", "T", "F", "S", "S"]):
+        ax.text(gx + i * cw + cw / 2, gy - 1.5, d, ha="center", va="center", fontsize=8,
+                fontweight="bold", color=colour, zorder=6)
+    for ri, week in enumerate(cal):
         for c, day in enumerate(week):
             if day == 0:
                 continue
-            weekend = c >= 5
-            g.add_patch(plt.Rectangle((c, r_i), 1, 1, fill=weekend,
-                                      facecolor="#f1ece0", edgecolor="#bbb", lw=0.7))
-            g.text(c + 0.08, r_i + 0.1, str(day), fontsize=11, va="top",
-                   color="#b00" if c == 6 else "#333")
+            xx, yy = gx + c * cw, gy - 3 - (ri + 1) * ch
+            ax.add_patch(Rectangle((xx, yy), cw, ch, fc="#f1ece0" if c >= 5 else "none",
+                                   ec="#c9c2ad", lw=0.6, zorder=6))
+            ax.text(xx + 0.5, yy + ch - 0.6, str(day), fontsize=8.5, va="top", zorder=7,
+                    color="#b00" if c == 6 else "#333")
+
+    # stats
+    sy0 = 22.0
+    ax.text(5, sy0, "IDENTICAL IN EVERY MONTH", fontsize=7.5, fontweight="bold", color="#444",
+            va="center", zorder=6)
+    items = [("mean x", st["mean_x"]), ("mean y", st["mean_y"]), ("sd x", st["sd_x"]),
+             ("sd y", st["sd_y"]), ("Pearson r", st["r"]), ("R²", st["r2"])]
+    for i, (k, v) in enumerate(items):
+        col, row = divmod(i, 3)
+        xx, yy = 5 + col * 20, sy0 - 3.4 - row * 3.4
+        ax.text(xx, yy, k, fontsize=8.5, color="#555", va="center", zorder=6)
+        ax.text(xx + 17, yy, f"{v:.2f}", fontsize=8.5, color="#222", ha="right", va="center",
+                fontfamily="monospace", fontweight="bold" if k == "R²" else "normal", zorder=6)
+    ax.text(5, 5.2, f"n = {len(x)}: {int((kind == 0).sum())} dozen points + "
+            f"{int((kind == 1).sum())} ribbon + {int((kind == 2).sum())} background stars",
+            fontsize=6.3, color="#888", va="center", zorder=6)
+    ax.text(W - 2, 2, "Same stats, different graphs · Matejka & Fitzmaurice (2017) · "
+            "plot units: 1 = 0.1 in", fontsize=6.3, color="#888", ha="right", va="center", zorder=6)
 
     fig.savefig(out_png, dpi=150)
     pdf.savefig(fig)
@@ -308,32 +193,42 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--year", type=int, default=2027)
     ap.add_argument("--r", type=float, default=0.816,
-                    help="shared Pearson r (0.816 = Anscombe, R²≈0.67; -0.06 = Datasaurus, R²≈0)")
+                    help="shared Pearson r (0.816 = Anscombe, R²≈0.67)")
     ap.add_argument("--out", default="out")
+    ap.add_argument("--data", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                   "data", "datasaurus_dozen.csv"))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    dozen = load_dozen(a.data)
+
+    natural = [compose(dozen[name], a.r, m) for m, (name, _) in enumerate(MONTHS, start=1)]
+    mean = (np.mean([x.mean() for x, _, _ in natural]), np.mean([y.mean() for _, y, _ in natural]))
+    sd = (np.mean([x.std(ddof=1) for x, _, _ in natural]), np.mean([y.std(ddof=1) for _, y, _ in natural]))
 
     rows, all_stats = [], []
     with PdfPages(os.path.join(a.out, f"datasaurus_calendar_{a.year}.pdf")) as pdf:
-        for m, ((fn, caption), colour) in enumerate(zip(SHAPES, PALETTE), start=1):
-            x, y, is_star = compose(fn, a.r, m)
+        for m, ((name, colour), (x, y, kind)) in enumerate(zip(MONTHS, natural), start=1):
+            r_nat = np.corrcoef(x, y)[0, 1]
+            x, y = exact_fix(x, y, a.r, mean, sd)
             st = stats(x, y)
             all_stats.append(st)
-            draw_month(pdf, a.year, m, x, y, is_star, caption, st, colour,
+            off = int(((x < 0) | (x > W) | (y < 0) | (y > H)).sum())
+            print(f"{calendar.month_name[m]:9s} {name:10s} natural r={r_nat:.3f}  off-page={off}")
+            draw_month(pdf, a.year, m, x, y, kind, name, st, colour,
                        os.path.join(a.out, f"{m:02d}_{calendar.month_name[m].lower()}.png"))
-            rows += [(calendar.month_name[m], f"{u:.6f}", f"{v:.6f}", "star" if k else "shape")
-                     for u, v, k in zip(x, y, is_star)]
+            rows += [(calendar.month_name[m], name, f"{u:.6f}", f"{v:.6f}",
+                      ("shape", "band_star", "background_star")[int(k)])
+                     for u, v, k in zip(x, y, kind)]
 
     with open(os.path.join(a.out, "datasets.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["month", "x", "y", "kind"])
+        w.writerow(["month", "dozen_dataset", "x", "y", "kind"])
         w.writerows(rows)
 
-    keys = all_stats[0].keys()
-    spread = {k: max(s[k] for s in all_stats) - min(s[k] for s in all_stats) for k in keys}
     print("max spread across the 12 months (should be ~0):")
-    for k, v in spread.items():
-        print(f"  {k:10s} {all_stats[0][k]: .4f}   spread {v:.2e}")
+    for k in all_stats[0]:
+        vals = [s[k] for s in all_stats]
+        print(f"  {k:10s} {vals[0]: .4f}   spread {max(vals) - min(vals):.2e}")
 
 
 if __name__ == "__main__":
