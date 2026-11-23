@@ -9,7 +9,7 @@ R² = 0.67 (equal to ~1e-14).
 * The other months are my own drawings: Heart, Anscombe II/III/IV, Flower, Sun, Wave, Binary star,
   Spiral, X, Tree.
 * **The main drawing is never distorted.** It is drawn at uniform scale. A baby copy of it
-  (64 points) and 220 stars sit in the two corners along the diagonal and carry the correlation;
+  (64 points, larger markers) and 220 stars sit in the two corners along the diagonal and carry the correlation;
   the width of the star ribbon is tuned so r matches. One small affine map applied to those
   extras only (never to the main drawing) then makes the statistics exactly equal.
 * ~490 points per plot (142 drawing + 128 baby + 220 stars).

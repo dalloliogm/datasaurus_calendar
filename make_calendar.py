@@ -151,7 +151,7 @@ SHAPES = [
 TARGET_SD = 30.0             # common sd(x) = sd(y) of every month (plot units)
 N_STARS = 220                # loose stars sprinkled along the diagonal tails
 # baby copies of the month's drawing, per side of the diagonal: (scale, points, distance, sideways offset)
-BABIES = [(0.38, 64, 54.0, 0.0)]
+BABIES = [(0.44, 64, 54.0, 0.0)]
 SHAPE_RADIUS = 34.0          # 95th-percentile radius of the main drawing (plot units)
 RADIUS = {"Sun": 28.0}                  # optional per-caption overrides
 TAIL_END = 68.0              # the star tails run out to this distance along the diagonal
@@ -289,11 +289,11 @@ def draw_month(pdf, year, month, x, y, kind, caption, st, colour, out_png):
     ax = fig.add_axes([0.06, 0.46, 0.42, 0.42])
     ax.set_facecolor("white")
     px, py = 0.08 * np.ptp(x), 0.08 * np.ptp(y)
-    ax.scatter(x[kind == MINI], y[kind == MINI], s=16, color=colour, edgecolor="white", linewidth=0.4, zorder=4)
+    ax.scatter(x[kind == MINI], y[kind == MINI], s=28, color=colour, edgecolor="white", linewidth=0.5, zorder=4)
     ax.scatter(x[kind == SHAPE], y[kind == SHAPE], s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
     glyph, gcol = STAR_GLYPH.get(month, DEFAULT_STAR)
     for u, v in zip(x[kind == STAR], y[kind == STAR]):
-        ax.text(u, v, glyph, color=gcol, fontsize=7.5, ha="center", va="center",
+        ax.text(u, v, glyph, color=gcol, fontsize=11.5, ha="center", va="center",
                 fontfamily="DejaVu Sans", zorder=2)
     xs = np.array([x.min(), x.max()])
     ax.plot(xs, st["slope"] * xs + st["intercept"], color="#222", lw=1.2, ls="--", zorder=2)
