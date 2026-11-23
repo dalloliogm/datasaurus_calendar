@@ -1,21 +1,21 @@
 # Datasaurus / Anscombe calendar
 
-Twelve months, twelve different scatter plots, one set of statistics: identical mean(x),
-mean(y), sd(x), sd(y), Pearson r = 0.816 and therefore the same regression line and
-R² = 0.67 (equal to ~1e-14).
+Twelve months, twelve different scatter plots.
 
-* January is the real **Datasaurus** (`dino` from the Datasaurus Dozen, Matejka & Fitzmaurice 2017;
-  data in `data/datasaurus_dozen.csv`, from the `datasauRus` CRAN package).
-* The other months are my own drawings: Heart, Anscombe II/III/IV, Flower, Sun, Wave, Binary star,
-  Spiral, X, Tree.
-* **The main drawing is never distorted.** It is drawn at uniform scale. A baby copy of it
-  (64 points, larger markers) and 220 stars sit in the two corners along the diagonal and carry the correlation;
-  the width of the star ribbon is tuned so r matches. One small affine map applied to those
-  extras only (never to the main drawing) then makes the statistics exactly equal.
-* ~490 points per plot (142 drawing + 128 baby + 220 stars).
+* **January is the original Datasaurus**, untouched (`dino` from the Datasaurus Dozen, Matejka &
+  Fitzmaurice 2017; `data/datasaurus_dozen.csv`, from the `datasauRus` CRAN package). Nothing is
+  added or moved, so it keeps its own stats: r = -0.06, R² = 0.004.
+* **February-December** share *identical* mean(x), mean(y), sd(x), sd(y), Pearson r = 0.816 and
+  therefore the same regression line and R² = 0.67 (equal to ~1e-13). Drawings: Heart,
+  Anscombe II/III/IV, Flower, Sun, Wave, Binary star, Spiral, X, Tree.
+* **The main drawing is never distorted.** It is drawn at uniform scale. Around it:
+  a baby copy of it in each corner (64 points each), 360 stars along the diagonal, and 130 small
+  sparse points that fill the white gaps (farthest-point sampling). The stars carry the correlation
+  (the ribbon width is tuned so r matches); one small affine map applied to those extras only
+  (never to the main drawing) then makes the statistics exactly equal.
+* ~760 points per plot (142 drawing + 128 baby + 360 stars + 130 sparse).
 
 ```bash
 pip install numpy matplotlib scipy
-python make_calendar.py --year 2027      # -> out/datasaurus_calendar_2027.pdf, PNGs, datasets.csv
-python make_calendar.py --r 0.9          # different shared correlation (may need other settings)
+python make_calendar.py --year 2027      # ~40 s -> out/datasaurus_calendar_2027.pdf, PNGs, datasets.csv
 ```

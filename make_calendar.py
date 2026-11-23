@@ -149,16 +149,32 @@ SHAPES = [
 
 # --------------------------------------------------------------------------
 TARGET_SD = 30.0             # common sd(x) = sd(y) of every month (plot units)
-N_STARS = 220                # loose stars sprinkled along the diagonal tails
+N_STARS = 360                # loose stars sprinkled along the diagonal tails
 # baby copies of the month's drawing, per side of the diagonal: (scale, points, distance, sideways offset)
 BABIES = [(0.44, 64, 54.0, 0.0)]
-SHAPE_RADIUS = 34.0          # 95th-percentile radius of the main drawing (plot units)
-RADIUS = {"Sun": 28.0}                  # optional per-caption overrides
-TAIL_END = 68.0              # the star tails run out to this distance along the diagonal
+SHAPE_RADIUS = 30.0          # 95th-percentile radius of the main drawing (plot units)
+RADIUS = {"Sun": 26.0}                  # optional per-caption overrides
+TAIL_END = 82.0              # the star tails run out to this distance along the diagonal
 GAP = 3.5                    # keep stars this far from drawings
 STAR_GLYPH = {2: ("\u2665", "#ff7b9c"), 5: ("\u273f", "#f08fb5"), 12: ("\u2744", "#5aa9e6")}
 DEFAULT_STAR = ("\u2605", "#f2b705")
-SHAPE, MINI, STAR = 0, 1, 2
+SHAPE, MINI, STAR, SPARSE = 0, 1, 2, 3
+N_SPARSE = 130               # small points that fill the white gaps (farthest-point sampling)
+_g = np.linspace(3, 97, 36)
+CAND_X, CAND_Y = [a.ravel() for a in np.meshgrid(_g, _g)]
+
+
+def sparse_fill(ox, oy, k=None):
+    """Pick k points from a grid, each time the one farthest from everything so far:
+    an even, blue-noise-like sprinkle that lands in the biggest empty spots first."""
+    k = N_SPARSE if k is None else k
+    d = np.hypot(CAND_X[:, None] - ox[None, :], CAND_Y[:, None] - oy[None, :]).min(axis=1)
+    pick = []
+    for _ in range(k):
+        i = int(np.argmax(d))
+        pick.append(i)
+        d = np.minimum(d, np.hypot(CAND_X - CAND_X[i], CAND_Y - CAND_Y[i]))
+    return CAND_X[pick], CAND_Y[pick]
 
 
 def _near(px, py, ox, oy, gap):
@@ -186,7 +202,7 @@ def layout(fn, r_target, seed, radius=SHAPE_RADIUS):
         idx = rng.choice(n, npts, replace=False)
         baby_pts.append(((sx[idx] - 50) * scale, (sy[idx] - 50) * scale, u, p))
 
-    M = N_STARS * 25
+    M = N_STARS * 30
     t, side, perp1 = rng.uniform(0, 1, M), rng.choice([-1, 1], M), rng.normal(0, 1.0, M)
     lo = shape_u + 4
 
@@ -202,19 +218,22 @@ def layout(fn, r_target, seed, radius=SHAPE_RADIUS):
         u = side * (lo + t * (TAIL_END - lo))
         perp = sigma * perp1
         px, py = 50 + (u - perp) / np.sqrt(2), 50 + (u + perp) / np.sqrt(2)
-        ok = ~_near(px, py, ox, oy, GAP) & (px > 2) & (px < 98) & (py > 2) & (py < 98)
+        ok = ~_near(px, py, ox, oy, GAP) & (px > -6) & (px < 106) & (py > -6) & (py < 106)
         px, py = px[ok][:N_STARS], py[ok][:N_STARS]
         if len(px) < N_STARS:
             return None
-        kind = np.concatenate([np.full(n, SHAPE), np.full(len(bx), MINI), np.full(N_STARS, STAR)])
-        return np.concatenate([ox, px]), np.concatenate([oy, py]), kind
+        ax_, ay_ = np.concatenate([ox, px]), np.concatenate([oy, py])
+        qx, qy = sparse_fill(ax_, ay_)
+        kind = np.concatenate([np.full(n, SHAPE), np.full(len(bx), MINI),
+                               np.full(N_STARS, STAR), np.full(N_SPARSE, SPARSE)])
+        return np.concatenate([ax_, qx]), np.concatenate([ay_, qy]), kind
 
     def r_of(sigma):
         out = build(sigma)
         return None if out is None else np.corrcoef(out[0], out[1])[0, 1]
 
     a, b = 0.3, 40.0                                 # wider ribbon -> lower r
-    for _ in range(50):
+    for _ in range(26):
         mid = (a + b) / 2
         r = r_of(mid)
         a, b = (mid, b) if (r is not None and r > r_target) else (a, mid)
@@ -274,7 +293,7 @@ PALETTE = ["#e63946", "#d6336c", "#f77f00", "#e09f00", "#2a9d8f", "#fcbf49",
            "#3a86ff", "#7b2cbf", "#6a994e", "#bc4749", "#118ab2", "#2b9348"]
 
 
-def draw_month(pdf, year, month, x, y, kind, caption, st, colour, out_png):
+def draw_month(pdf, year, month, x, y, kind, caption, st, colour, out_png, original=False):
     fig = plt.figure(figsize=(11, 8.5))
     fig.patch.set_facecolor("#fbf8f1")
 
@@ -282,13 +301,17 @@ def draw_month(pdf, year, month, x, y, kind, caption, st, colour, out_png):
     fig.text(0.06, 0.94, calendar.month_name[month].upper(), fontsize=34,
              fontweight="bold", color=colour, va="center")
     fig.text(0.94, 0.94, str(year), fontsize=34, color="#555", ha="right", va="center")
-    fig.text(0.06, 0.895, f"“{caption}” — same mean, SD, correlation and R² as every other month",
+    sub = (f"“{caption}” — the original, untouched dataset (r = {st['r']:.2f}, R² = {st['r2']:.3f}); "
+           "the other months share r = 0.82, R² = 0.67" if original else
+           f"“{caption}” — same mean, SD, correlation and R² as every other month except January")
+    fig.text(0.06, 0.895, sub,
              fontsize=10.5, color="#555", style="italic")
 
     # scatter plot
     ax = fig.add_axes([0.06, 0.46, 0.42, 0.42])
     ax.set_facecolor("white")
     px, py = 0.08 * np.ptp(x), 0.08 * np.ptp(y)
+    ax.scatter(x[kind == SPARSE], y[kind == SPARSE], s=11, color="#9aa7c7", alpha=0.8, linewidth=0, zorder=2)
     ax.scatter(x[kind == MINI], y[kind == MINI], s=28, color=colour, edgecolor="white", linewidth=0.5, zorder=4)
     ax.scatter(x[kind == SHAPE], y[kind == SHAPE], s=22, color=colour, alpha=0.85, edgecolor="white", linewidth=0.4, zorder=3)
     glyph, gcol = STAR_GLYPH.get(month, DEFAULT_STAR)
@@ -314,13 +337,13 @@ def draw_month(pdf, year, month, x, y, kind, caption, st, colour, out_png):
             ("sd x", st["sd_x"]), ("sd y", st["sd_y"]),
             ("Pearson r", st["r"]), ("R²", st["r2"]),
             ("slope", st["slope"]), ("intercept", st["intercept"])]
-    pn.text(0, 1, "IDENTICAL EVERY MONTH", fontsize=9, fontweight="bold", color="#444", va="top")
+    pn.text(0, 1, "ORIGINAL STATS" if original else "SAME IN EVERY OTHER MONTH", fontsize=9, fontweight="bold", color="#444", va="top")
     for i, (k, v) in enumerate(rows):
         yy = 0.86 - i * 0.105
         pn.text(0, yy, k, fontsize=11, color="#555", va="center")
         pn.text(1, yy, f"{v:.2f}", fontsize=11, color="#222", ha="right", va="center",
                 fontfamily="monospace", fontweight="bold" if k == "R²" else "normal")
-    pn.text(0, -0.02, f"n = {len(x)} points ({int((kind == SHAPE).sum())} drawing + {int((kind == MINI).sum())} baby + {int((kind == STAR).sum())} {glyph})", fontsize=9, color="#888", va="center")
+    pn.text(0, -0.02, f"n = {len(x)} points ({int((kind == SHAPE).sum())} drawing + {int((kind == MINI).sum())} baby + {int((kind == STAR).sum())} {glyph} + {int((kind == SPARSE).sum())} sparse)" if not original else f"n = {len(x)} points (original data, nothing added)", fontsize=9, color="#888", va="center")
 
     # day grid
     cal = calendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
@@ -355,22 +378,28 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
-    natural = [layout(fn, a.r, m, RADIUS.get(cap, SHAPE_RADIUS))
-               for m, (fn, cap) in enumerate(SHAPES, start=1)]
     mean, sd = (50.0, 50.0), (TARGET_SD, TARGET_SD)
 
     rows, all_stats = [], []
     with PdfPages(os.path.join(a.out, f"datasaurus_calendar_{a.year}.pdf")) as pdf:
-        for m, ((fn, caption), colour, (x, y, kind)) in enumerate(zip(SHAPES, PALETTE, natural), start=1):
-            r_nat = np.corrcoef(x, y)[0, 1]
-            x, y, resid, sv = fix_extras(x, y, kind, a.r, mean, sd)
-            st = stats(x, y)
-            all_stats.append(st)
-            print(f"{calendar.month_name[m]:9s} {caption:18s} natural r={r_nat:.3f}  resid={resid:.1e}  extras map sv={sv[0]:.2f},{sv[1]:.2f}  "
-                  f"off-plot={int(((x < 0) | (x > 100) | (y < 0) | (y > 100)).sum())}")
-            draw_month(pdf, a.year, m, x, y, kind, caption, st, colour,
-                       os.path.join(a.out, f"{m:02d}_{calendar.month_name[m].lower()}.png"))
-            rows += [(calendar.month_name[m], f"{u:.6f}", f"{v:.6f}", ("shape", "baby", "star")[int(k)])
+        for m, ((fn, caption), colour) in enumerate(zip(SHAPES, PALETTE), start=1):
+            png = os.path.join(a.out, f"{m:02d}_{calendar.month_name[m].lower()}.png")
+            if fn is dino:                       # the real Datasaurus: nothing added, nothing moved
+                x, y = (np.asarray(v, float) for v in fn())
+                kind = np.full(len(x), SHAPE)
+                st = stats(x, y)
+                print(f"{calendar.month_name[m]:9s} {caption:18s} ORIGINAL data, r={st['r']:.3f}, n={len(x)}")
+                draw_month(pdf, a.year, m, x, y, kind, caption, st, colour, png, original=True)
+            else:
+                x, y, kind = layout(fn, a.r, m, RADIUS.get(caption, SHAPE_RADIUS))
+                r_nat = np.corrcoef(x, y)[0, 1]
+                x, y, resid, sv = fix_extras(x, y, kind, a.r, mean, sd)
+                st = stats(x, y)
+                all_stats.append(st)
+                print(f"{calendar.month_name[m]:9s} {caption:18s} natural r={r_nat:.3f}  resid={resid:.1e}  "
+                      f"extras map sv={sv[0]:.2f},{sv[1]:.2f}  n={len(x)}")
+                draw_month(pdf, a.year, m, x, y, kind, caption, st, colour, png)
+            rows += [(calendar.month_name[m], f"{u:.6f}", f"{v:.6f}", ("shape", "baby", "star", "sparse")[int(k)])
                      for u, v, k in zip(x, y, kind)]
 
     with open(os.path.join(a.out, "datasets.csv"), "w", newline="") as f:
@@ -380,7 +409,7 @@ def main():
 
     keys = all_stats[0].keys()
     spread = {k: max(s[k] for s in all_stats) - min(s[k] for s in all_stats) for k in keys}
-    print("max spread across the 12 months (should be ~0):")
+    print("max spread across Feb-Dec (should be ~0):")
     for k, v in spread.items():
         print(f"  {k:10s} {all_stats[0][k]: .4f}   spread {v:.2e}")
 
